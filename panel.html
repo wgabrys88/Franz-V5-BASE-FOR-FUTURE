@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<title>Franz Panel</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0d0d0f;--surface:#16161a;--surface2:#1e1e24;--border:#2a2a35;
+  --accent:#4a9eff;--ok:#3ecf8e;--err:#ff4455;--warn:#f0a000;--purple:#c084fc;
+  --text:#e8e8f0;--dim:#6b6b80;--mid:#a0a0b8;
+  --mono:"Cascadia Code","Fira Code","Consolas",monospace
+}
+html,body{background:var(--bg);color:var(--text);font-family:system-ui,sans-serif;font-size:13px;height:100vh;display:flex;flex-direction:column;overflow:hidden}
+
+#topbar{
+  display:flex;align-items:center;gap:12px;padding:7px 16px;
+  background:var(--surface);border-bottom:1px solid var(--border);flex-shrink:0
+}
+#topbar-title{font-family:var(--mono);font-size:11px;font-weight:700;color:var(--dim);letter-spacing:.1em;text-transform:uppercase}
+#agent-count{font-family:var(--mono);font-size:11px;color:var(--mid)}
+#dot{width:7px;height:7px;border-radius:50%;background:var(--err);flex-shrink:0;margin-left:auto}
+#dot.live{background:var(--ok)}
+
+#grid{display:grid;grid-template-columns:1fr;flex:1;min-height:0;gap:1px;background:var(--border)}
+
+.pane{background:var(--bg);display:flex;flex-direction:column;min-height:0;min-width:0}
+.pane-head{
+  display:flex;align-items:center;gap:8px;padding:6px 12px;
+  background:var(--surface);border-bottom:1px solid var(--border);flex-shrink:0
+}
+.agent-pill{font-size:10px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;padding:2px 9px;border-radius:10px}
+.pane-model{font-family:var(--mono);font-size:10px;color:var(--dim)}
+.pane-dot{width:6px;height:6px;border-radius:50%;background:var(--dim);flex-shrink:0;margin-left:auto}
+.pane-dot.live{background:var(--ok)}
+.pane-dot.pending{background:var(--warn)}
+
+.pane-req{flex:1;display:flex;align-items:center;justify-content:center;padding:8px;min-height:0;overflow:hidden;border-bottom:1px solid var(--border)}
+.pane-req img{max-width:100%;max-height:100%;object-fit:contain;display:none}
+.pane-req .placeholder{color:var(--border);font-size:11px;font-family:var(--mono)}
+
+.pane-res{
+  flex:1;padding:10px 12px;font-family:var(--mono);font-size:11px;
+  color:var(--mid);line-height:1.65;white-space:pre-wrap;word-break:break-word;
+  overflow-y:auto;min-height:0;border-bottom:1px solid var(--border)
+}
+.pane-res .placeholder{color:var(--border)}
+
+.pane-hist{
+  flex-shrink:0;display:flex;align-items:center;gap:5px;
+  padding:5px 10px;background:var(--surface);overflow-x:auto;min-height:30px
+}
+.pane-hist::-webkit-scrollbar{height:3px}
+.pane-hist::-webkit-scrollbar-thumb{background:var(--border)}
+.chip{
+  flex-shrink:0;display:flex;align-items:center;gap:4px;
+  background:var(--surface2);border:1px solid var(--border);border-radius:4px;
+  padding:2px 7px;font-family:var(--mono);font-size:10px;white-space:nowrap
+}
+.chip .cdur{color:var(--mid)}
+.chip .cok{width:5px;height:5px;border-radius:50%;background:var(--ok);flex-shrink:0}
+.chip .cerr{width:5px;height:5px;border-radius:50%;background:var(--err);flex-shrink:0}
+</style>
+</head>
+<body>
+
+<div id="topbar">
+  <span id="topbar-title">Franz</span>
+  <span id="agent-count">0 agents</span>
+  <div id="dot"></div>
+</div>
+<div id="grid"></div>
+
+<script type="module">
+const NORM = 1000;
+const grid = document.getElementById('grid');
+const dot = document.getElementById('dot');
+const agentCount = document.getElementById('agent-count');
+const panes = new Map();
+const pending = new Map();
+
+const COLORS = ['#4a9eff','#3ecf8e','#f0a000','#c084fc','#ff4455','#06b6d4','#f97316','#a3e635'];
+let colorIdx = 0;
+
+function agentColor(name) {
+  if (!agentColor._map) agentColor._map = {};
+  if (!agentColor._map[name]) agentColor._map[name] = COLORS[(colorIdx++) % COLORS.length];
+  return agentColor._map[name];
+}
+
+function hexToRgba(hex, a) {
+  const r = parseInt(hex.slice(1,3),16), g = parseInt(hex.slice(3,5),16), b = parseInt(hex.slice(5,7),16);
+  return `rgba(${r},${g},${b},${a})`;
+}
+
+function getOrCreatePane(agent) {
+  if (panes.has(agent)) return panes.get(agent);
+
+  const color = agentColor(agent);
+  const pane = document.createElement('div');
+  pane.className = 'pane';
+
+  pane.innerHTML = `
+    <div class="pane-head">
+      <span class="agent-pill" style="background:${hexToRgba(color,0.15)};color:${color}">${agent}</span>
+      <span class="pane-model"></span>
+      <span class="pane-dot"></span>
+    </div>
+    <div class="pane-req"><img alt=""/><span class="placeholder">no image</span></div>
+    <div class="pane-res"><span class="placeholder">waiting...</span></div>
+    <div class="pane-hist"></div>`;
+
+  grid.appendChild(pane);
+  const count = panes.size + 1;
+  grid.style.gridTemplateColumns = `repeat(${count}, 1fr)`;
+  agentCount.textContent = `${count} agent${count === 1 ? '' : 's'}`;
+
+  const p = {
+    model: pane.querySelector('.pane-model'),
+    pdot: pane.querySelector('.pane-dot'),
+    img: pane.querySelector('.pane-req img'),
+    placeholder: pane.querySelector('.pane-req .placeholder'),
+    res: pane.querySelector('.pane-res'),
+    hist: pane.querySelector('.pane-hist'),
+    timer: null,
+    reqStart: 0,
+  };
+  panes.set(agent, p);
+  return p;
+}
+
+const drawPolygonOn = (ctx, ov, w, h) => {
+  const pts = (ov.points||[]).map(p=>[(p[0]||0)*w/NORM,(p[1]||0)*h/NORM]);
+  if (pts.length < 2) return;
+  ctx.beginPath(); ctx.moveTo(pts[0][0],pts[0][1]);
+  for (let i=1;i<pts.length;i++) ctx.lineTo(pts[i][0],pts[i][1]);
+  if (ov.closed) ctx.closePath();
+  if (ov.fill){ctx.fillStyle=ov.fill;ctx.fill();}
+  if (ov.stroke){ctx.strokeStyle=ov.stroke;ctx.lineWidth=ov.stroke_width||1;ctx.lineJoin='round';ctx.lineCap='round';ctx.stroke();}
+};
+
+const renderAnnotated = async (raw_b64, overlays) => {
+  const img = await new Promise((res,rej)=>{const i=new Image();i.onload=()=>res(i);i.onerror=rej;i.src=`data:image/png;base64,${raw_b64}`;});
+  const oc = new OffscreenCanvas(img.naturalWidth, img.naturalHeight);
+  const ctx = oc.getContext('2d');
+  ctx.drawImage(img,0,0);
+  for (const ov of overlays) drawPolygonOn(ctx, ov, img.naturalWidth, img.naturalHeight);
+  const blob = await oc.convertToBlob({type:'image/png'});
+  return new Promise(res=>{const r=new FileReader();r.onload=()=>res(r.result.split(',')[1]);r.readAsDataURL(blob);});
+};
+
+const es = new EventSource('/events');
+es.addEventListener('connected', () => { dot.className = 'live'; });
+es.onerror = () => { dot.className = ''; };
+
+es.addEventListener('annotate', async e => {
+  const {request_id, raw_b64, overlays, model, agent} = JSON.parse(e.data);
+  const p = getOrCreatePane(agent || 'default');
+
+  p.reqStart = Date.now();
+  pending.set(request_id, {agent, start: p.reqStart});
+  p.model.textContent = model || '';
+  p.pdot.className = 'pane-dot pending';
+  p.res.innerHTML = '<span class="placeholder">waiting...</span>';
+
+  clearInterval(p.timer);
+
+  if (raw_b64) {
+    p.img.style.display = 'block';
+    p.placeholder.style.display = 'none';
+    p.img.src = `data:image/png;base64,${raw_b64}`;
+    try {
+      const annotated_b64 = await renderAnnotated(raw_b64, overlays||[]);
+      p.img.src = `data:image/png;base64,${annotated_b64}`;
+      await fetch('/result',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({request_id,annotated_b64})});
+    } catch {
+      await fetch('/result',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({request_id,annotated_b64:raw_b64})});
+    }
+  } else {
+    p.img.style.display = 'none';
+    p.placeholder.style.display = '';
+    await fetch('/result',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({request_id,annotated_b64:''})});
+  }
+});
+
+es.addEventListener('vlm_done', e => {
+  const {request_id, text, annotated_b64, agent} = JSON.parse(e.data);
+  const p = getOrCreatePane(agent || 'default');
+  const slot = pending.get(request_id);
+  pending.delete(request_id);
+  clearInterval(p.timer);
+
+  const dur = `${((Date.now() - (slot?.start ?? p.reqStart)) / 1000).toFixed(1)}s`;
+  p.pdot.className = 'pane-dot live';
+  p.res.textContent = text || '';
+
+  if (annotated_b64) {
+    p.img.style.display = 'block';
+    p.placeholder.style.display = 'none';
+    p.img.src = `data:image/png;base64,${annotated_b64}`;
+  }
+
+  const chip = document.createElement('div');
+  chip.className = 'chip';
+  chip.innerHTML = `<span class="cdur">${dur}</span><span class="${text ? 'cok' : 'cerr'}"></span>`;
+  p.hist.appendChild(chip);
+  chip.scrollIntoView({behavior:'smooth',inline:'end'});
+});
+</script>
+</body>
+</html>
